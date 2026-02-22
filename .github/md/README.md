@@ -33,12 +33,6 @@ Currently only AMD64 Linux is supported. Support for other platforms is not plan
 
 The code of this project is "Apache License" but the license of the models may be different.
 
-## Models
-
-```
-
-```
-
 ## Examples
 
 ### ASR Whisper.cpp
