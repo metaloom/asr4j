@@ -51,19 +51,18 @@ String LANG = "en";
 String MODEL_PATH = "models/ggml-large-v3-turbo.bin";
 
 Whisper whisper = Whisper.create(MODEL_PATH);
-// whisper.transcribe("movies/siw.das.fehlende.fragment.avi", "de");
 whisper.transcribe(MOVIE, LANG).subscribe(new Flow.Subscriber<>() {
 
 	@Override
 	public void onSubscribe(Flow.Subscription subscription) {
-		subscription.request(Long.MAX_VALUE); // request all items
+		subscription.request(Long.MAX_VALUE);
 	}
 
 	@Override
-	public void onNext(WhisperSegment item) {
-		System.out.println("start: " + item.getStart());
-		System.out.println("end: " + item.getEnd());
-		System.out.println("text: " + item.getSentence());
+	public void onNext(WhisperSegment segment) {
+		System.out.println("start: " + segment.getStart());
+		System.out.println("end: " + segment.getEnd());
+		System.out.println("text: " + segment.getSentence());
 	}
 
 	@Override
@@ -88,9 +87,11 @@ latch.await();
 
 ```java
 String MOVIE = "media/jfk.webm";
+
 ASRClient client = ASRClient.newBuilder()
 	.setModel(ASRClient.DEFAULT_WHISPER_MODEL_NAME)
 	.setBaseURL("http://localhost:8000/v1").build();
+
 HttpResponse<JsonObject> response = client.transcribe(MOVIE);
 System.out.println(response.statusCode());
 System.out.println(response.body().encodePrettily());
@@ -111,11 +112,12 @@ vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --compilation_config '{"cudag
 
 ```java
 String MOVIE = "media/jfk.webm";
+
 ASRClient client = ASRClient.newBuilder()
 	.setModel(ASRClient.DEFAULT_VOXTRAL_MODEL_NAME)
 	.setBaseURL("http://localhost:8000/v1").build();
+
 client.realtime(MOVIE);
-System.in.read();
 ```
 ## Build 
 

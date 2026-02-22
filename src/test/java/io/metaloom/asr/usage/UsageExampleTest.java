@@ -31,10 +31,10 @@ public class UsageExampleTest {
 			}
 
 			@Override
-			public void onNext(WhisperSegment item) {
-				System.out.println("start: " + item.getStart());
-				System.out.println("end: " + item.getEnd());
-				System.out.println("text: " + item.getSentence());
+			public void onNext(WhisperSegment segment) {
+				System.out.println("start: " + segment.getStart());
+				System.out.println("end: " + segment.getEnd());
+				System.out.println("text: " + segment.getSentence());
 			}
 
 			@Override

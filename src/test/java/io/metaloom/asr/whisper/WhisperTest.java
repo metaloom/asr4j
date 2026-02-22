@@ -1,17 +1,19 @@
 package io.metaloom.asr.whisper;
 
+import java.util.ArrayList;
+import java.util.Comparator;
+import java.util.List;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Flow;
 
 import org.junit.jupiter.api.Test;
 
 import io.github.ggerganov.whispercpp.bean.WhisperSegment;
-import io.metaloom.asr.whisper.Whisper;
 
 public class WhisperTest {
 
-	private static final String MOVIE = "movies/siw.das.fehlende.fragment.avi";
-	private static final String LANG = "de";
+	private static final String MOVIE = "media/jfk.webm";
+	private static final String LANG = "en";
 	private static final String MODEL_PATH = "models/ggml-large-v3-turbo.bin";
 
 	@Test
@@ -19,7 +21,7 @@ public class WhisperTest {
 		CountDownLatch latch = new CountDownLatch(1);
 
 		Whisper whisper = Whisper.create(MODEL_PATH);
-		// whisper.transcribe("movies/siw.das.fehlende.fragment.avi", "de");
+		final List<WhisperSegment> segments = new ArrayList<>();
 		whisper.transcribe(MOVIE, LANG).subscribe(new Flow.Subscriber<>() {
 
 			@Override
@@ -28,10 +30,11 @@ public class WhisperTest {
 			}
 
 			@Override
-			public void onNext(WhisperSegment item) {
-				System.out.println("start: " + item.getStart());
-				System.out.println("end: " + item.getEnd());
-				System.out.println("text: " + item.getSentence());
+			public void onNext(WhisperSegment segment) {
+				segments.add(segment);
+				System.out.println("start: " + segment.getStart());
+				System.out.println("end: " + segment.getEnd());
+				System.out.println("text: " + segment.getSentence());
 			}
 
 			@Override
@@ -49,6 +52,13 @@ public class WhisperTest {
 			}
 		});
 		latch.await();
+
+		segments.sort((a, b) -> Long.compare(a.getStart(), b.getStart()));
+
+		for (WhisperSegment segment : segments) {
+			System.out.print(segment.getSentence());
+		}
+
 	}
 
 	@Test

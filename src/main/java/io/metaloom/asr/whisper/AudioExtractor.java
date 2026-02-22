@@ -28,31 +28,31 @@ public class AudioExtractor {
 			grabber.setSampleFormat(AV_SAMPLE_FMT_FLT);
 			grabber.start();
 
-			FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(wavOut, 1);
-			recorder.setFormat("wav");
-			recorder.setAudioChannels(1);
-			recorder.setSampleRate(16000);
-			recorder.setSampleFormat(AV_SAMPLE_FMT_S16);
-			recorder.setAudioCodec(AV_CODEC_ID_PCM_S16LE);
-			recorder.start();
+			try (FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(wavOut, 1)) {
+				recorder.setFormat("wav");
+				recorder.setAudioChannels(1);
+				recorder.setSampleRate(16000);
+				recorder.setSampleFormat(AV_SAMPLE_FMT_S16);
+				recorder.setAudioCodec(AV_CODEC_ID_PCM_S16LE);
+				recorder.start();
 
-			Frame frame;
-			while ((frame = grabber.grabSamples()) != null) {
-				if (frame.samples == null) {
-					continue;
+				Frame frame;
+				while ((frame = grabber.grabSamples()) != null) {
+					if (frame.samples == null) {
+						continue;
+					}
+
+					FloatBuffer fb = (FloatBuffer) frame.samples[0];
+					float[] floats = new float[fb.remaining()];
+					fb.get(floats);
+
+					short[] pcm16 = floatToPCM16(floats);
+					ShortBuffer sb = ShortBuffer.wrap(pcm16);
+					recorder.recordSamples(16000, 1, sb);
 				}
 
-				FloatBuffer fb = (FloatBuffer) frame.samples[0];
-				float[] floats = new float[fb.remaining()];
-				fb.get(floats);
-
-				short[] pcm16 = floatToPCM16(floats);
-				ShortBuffer sb = ShortBuffer.wrap(pcm16);
-				recorder.recordSamples(16000, 1, sb);
+				grabber.stop();
 			}
-
-			recorder.stop();
-			grabber.stop();
 
 			return wavOut.toByteArray();
 		}
@@ -101,7 +101,8 @@ public class AudioExtractor {
 					silenceCounter = 0; // reset silence counter when audio is detected
 				}
 
-				if (silenceCounter >= silenceMinSamples && totalSamples > 10_000) {
+				// Collect up to 10k samples before we dispatch a chunk
+				if (silenceCounter >= silenceMinSamples && totalSamples > 8_000) {
 					// System.err.println("Silence! " + silenceCounter);
 					audioChunkConsumer.accept(new AudioChunk(concat(chunks, totalSamples)));
 					chunks.clear();
@@ -117,7 +118,7 @@ public class AudioExtractor {
 				totalSamples = 0;
 			}
 
-			grabber.stop();
+//			grabber.stop();
 
 		}
 	}
