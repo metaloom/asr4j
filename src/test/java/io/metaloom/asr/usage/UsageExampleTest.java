@@ -78,6 +78,7 @@ public class UsageExampleTest {
 			.setModel(ASRClient.DEFAULT_VOXTRAL_MODEL_NAME)
 			.setBaseURL("http://localhost:8000/v1").build();
 		client.realtime(MOVIE);
+		System.in.read();
 		// SNIPPET END realtime-client-usage.example
 	}
 }

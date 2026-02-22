@@ -110,6 +110,12 @@ public class AudioExtractor {
 				}
 
 			}
+			// Also handle remaining chunks
+			if (!chunks.isEmpty()) {
+				audioChunkConsumer.accept(new AudioChunk(concat(chunks, totalSamples)));
+				chunks.clear();
+				totalSamples = 0;
+			}
 
 			grabber.stop();
 

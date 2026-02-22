@@ -115,6 +115,7 @@ ASRClient client = ASRClient.newBuilder()
 	.setModel(ASRClient.DEFAULT_VOXTRAL_MODEL_NAME)
 	.setBaseURL("http://localhost:8000/v1").build();
 client.realtime(MOVIE);
+System.in.read();
 ```
 ## Build 
 
