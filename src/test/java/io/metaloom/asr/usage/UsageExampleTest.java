@@ -23,12 +23,11 @@ public class UsageExampleTest {
 		String MODEL_PATH = "models/ggml-large-v3-turbo.bin";
 
 		Whisper whisper = Whisper.create(MODEL_PATH);
-		// whisper.transcribe("movies/siw.das.fehlende.fragment.avi", "de");
 		whisper.transcribe(MOVIE, LANG).subscribe(new Flow.Subscriber<>() {
 
 			@Override
 			public void onSubscribe(Flow.Subscription subscription) {
-				subscription.request(Long.MAX_VALUE); // request all items
+				subscription.request(Long.MAX_VALUE);
 			}
 
 			@Override
@@ -61,9 +60,11 @@ public class UsageExampleTest {
 	public void testTranscribeEndpoint() throws Exception {
 		// SNIPPET START transcribe-client-usage.example
 		String MOVIE = "media/jfk.webm";
+
 		ASRClient client = ASRClient.newBuilder()
 			.setModel(ASRClient.DEFAULT_WHISPER_MODEL_NAME)
 			.setBaseURL("http://localhost:8000/v1").build();
+
 		HttpResponse<JsonObject> response = client.transcribe(MOVIE);
 		System.out.println(response.statusCode());
 		System.out.println(response.body().encodePrettily());
@@ -74,11 +75,13 @@ public class UsageExampleTest {
 	public void testRealtimeEndpoint() throws Exception {
 		// SNIPPET START realtime-client-usage.example
 		String MOVIE = "media/jfk.webm";
+
 		ASRClient client = ASRClient.newBuilder()
 			.setModel(ASRClient.DEFAULT_VOXTRAL_MODEL_NAME)
 			.setBaseURL("http://localhost:8000/v1").build();
+
 		client.realtime(MOVIE);
-		System.in.read();
 		// SNIPPET END realtime-client-usage.example
+		System.in.read();
 	}
 }
