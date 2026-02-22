@@ -51,23 +51,34 @@ public class AudioExtractor {
 					recorder.recordSamples(16000, 1, sb);
 				}
 
-				grabber.stop();
 			}
 
 			return wavOut.toByteArray();
 		}
 	}
 
-	private static short[] floatToPCM16(float[] input) {
-		short[] out = new short[input.length];
-		for (int i = 0; i < input.length; i++) {
-			float v = Math.max(-1f, Math.min(1f, input[i]));
-			out[i] = (short) (v * 32767);
-		}
-		return out;
+	public static void decodeAudioToWAV(String videoPath, Consumer<WAVAudioChunk> audioChunkConsumer) throws Exception {
+		decodeAudioToPCM(videoPath, chunk -> {
+			ByteArrayOutputStream wavOut = new ByteArrayOutputStream();
+
+			try (FFmpegFrameRecorder recorder = new FFmpegFrameRecorder(wavOut, 1)) {
+				recorder.setFormat("wav");
+				recorder.setAudioChannels(1);
+				recorder.setSampleRate(16000);
+				recorder.setSampleFormat(AV_SAMPLE_FMT_S16);
+				recorder.setAudioCodec(AV_CODEC_ID_PCM_S16LE);
+				recorder.start();
+				short[] pcm16 = floatToPCM16(chunk.getAudio());
+				ShortBuffer sb = ShortBuffer.wrap(pcm16);
+				recorder.recordSamples(16000, 1, sb);
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+			audioChunkConsumer.accept(new WAVAudioChunk(wavOut.toByteArray()));
+		});
 	}
 
-	public static void decodeAudioToPCM(String videoPath, Consumer<AudioChunk> audioChunkConsumer) throws Exception {
+	public static void decodeAudioToPCM(String videoPath, Consumer<PCMAudioChunk> audioChunkConsumer) throws Exception {
 
 		try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(videoPath)) {
 
@@ -92,19 +103,21 @@ public class AudioExtractor {
 				float[] chunk = new float[fb.remaining()];
 				fb.get(chunk);
 
-				chunks.add(chunk);
-				totalSamples += chunk.length;
-
-				if (isSilentRMS(chunk, 0.02f)) {
+				if (isSilentRMS(chunk, 0.008f)) {
 					silenceCounter += chunk.length;
+					// We skip silence since whisper hallucinates silence into "thank you"
+					continue;
 				} else {
 					silenceCounter = 0; // reset silence counter when audio is detected
 				}
 
+				chunks.add(chunk);
+				totalSamples += chunk.length;
+
 				// Collect up to 10k samples before we dispatch a chunk
-				if (silenceCounter >= silenceMinSamples && totalSamples > 8_000) {
+				if ((silenceCounter >= silenceMinSamples && totalSamples > 25_000) || totalSamples > 30_000) {
 					// System.err.println("Silence! " + silenceCounter);
-					audioChunkConsumer.accept(new AudioChunk(concat(chunks, totalSamples)));
+					audioChunkConsumer.accept(new PCMAudioChunk(concat(chunks, totalSamples)));
 					chunks.clear();
 					totalSamples = 0;
 					continue;
@@ -113,14 +126,23 @@ public class AudioExtractor {
 			}
 			// Also handle remaining chunks
 			if (!chunks.isEmpty()) {
-				audioChunkConsumer.accept(new AudioChunk(concat(chunks, totalSamples)));
+				audioChunkConsumer.accept(new PCMAudioChunk(concat(chunks, totalSamples)));
 				chunks.clear();
 				totalSamples = 0;
 			}
 
-//			grabber.stop();
+			// grabber.stop();
 
 		}
+	}
+
+	private static short[] floatToPCM16(float[] input) {
+		short[] out = new short[input.length];
+		for (int i = 0; i < input.length; i++) {
+			float v = Math.max(-1f, Math.min(1f, input[i]));
+			out[i] = (short) (v * 32767);
+		}
+		return out;
 	}
 
 	private static boolean isSilentRMS(float[] samples, float threshold) {

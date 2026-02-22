@@ -1,10 +1,10 @@
 package io.metaloom.asr.whisper;
 
-public class AudioChunk {
+public class PCMAudioChunk {
 
 	private float[] audio;
 
-	public AudioChunk(float[] audio) {
+	public PCMAudioChunk(float[] audio) {
 		this.audio = audio;
 	}
 

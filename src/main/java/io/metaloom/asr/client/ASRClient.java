@@ -3,6 +3,7 @@ package io.metaloom.asr.client;
 import java.net.http.HttpResponse;
 
 import io.metaloom.asr.client.impl.ASRClientBuilderImpl;
+import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 
 public interface ASRClient {
@@ -10,7 +11,7 @@ public interface ASRClient {
 	public static final String DEFAULT_BASEURL = "http://localhost:8000";
 
 	public static final String DEFAULT_WHISPER_MODEL_NAME = "openai/whisper-large-v3";
-	
+
 	public static final String DEFAULT_VOXTRAL_MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602";
 
 	public static ASRClient newFaceDetectClient() {
@@ -83,5 +84,7 @@ public interface ASRClient {
 	 * @throws Exception
 	 */
 	void realtime(String mediaPath) throws Exception;
+
+	JsonArray transcribeSegmented(String movie) throws Exception;
 
 }

@@ -22,8 +22,9 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.metaloom.asr.client.ASRClient;
-import io.metaloom.asr.whisper.AudioChunk;
+import io.metaloom.asr.whisper.PCMAudioChunk;
 import io.metaloom.asr.whisper.AudioExtractor;
+import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 
 public class ASRClientImpl implements ASRClient {
@@ -55,17 +56,14 @@ public class ASRClientImpl implements ASRClient {
 	}
 
 	@Override
-	public HttpResponse<JsonObject> transcribe(String movie) throws Exception {
+	public HttpResponse<JsonObject> transcribe(String mediaPath) throws Exception {
 
-		byte[] wavData = AudioExtractor.decodeAudioToWAV(movie);
+		byte[] wavData = AudioExtractor.decodeAudioToWAV(mediaPath);
 		logger.info("WAV bytes: {}", wavData.length);
 
 		String boundary = "-------" + UUID.randomUUID();
 		byte[] body = buildMultipartBody(wavData, boundary);
-		// String str = new String(body, StandardCharsets.UTF_8); // for UTF-8 encoding
-		// System.out.println(str);
 
-		// System.in.read();
 		URI uri = URI.create(baseURL + "/audio/transcriptions");
 		System.out.println(uri);
 		HttpRequest request = HttpRequest.newBuilder()
@@ -83,6 +81,42 @@ public class ASRClientImpl implements ASRClient {
 		HttpResponse<JsonObject> response = client.send(request, jsonHandler);
 
 		return response;
+	}
+
+	@Override
+	public JsonArray transcribeSegmented(String mediaPath) throws Exception {
+
+		JsonArray json = new JsonArray();
+		AudioExtractor.decodeAudioToWAV(mediaPath, chunk -> {
+			try {
+				byte[] wavData = chunk.getAudio();
+				logger.info("WAV bytes: {}", wavData.length);
+
+				String boundary = "-------" + UUID.randomUUID();
+				byte[] body = buildMultipartBody(wavData, boundary);
+
+				URI uri = URI.create(baseURL + "/audio/transcriptions");
+				System.out.println(uri);
+				HttpRequest request = HttpRequest.newBuilder()
+					.uri(uri)
+					.header("Accept", "*/*")
+					.header("Authorization", "Bearer EMPTY")
+					.header("Content-Type", "multipart/form-data; boundary=" + boundary)
+					.POST(HttpRequest.BodyPublishers.ofByteArray(body))
+					.build();
+
+				BodyHandler<JsonObject> jsonHandler = responseInfo -> BodySubscribers.mapping(
+					BodySubscribers.ofString(StandardCharsets.UTF_8),
+					JsonObject::new);
+
+				HttpResponse<JsonObject> response = client.send(request, jsonHandler);
+				//System.out.println(response.body());
+				json.add(response.body().getString("text"));
+			} catch (Exception e) {
+				e.printStackTrace();
+			}
+		});
+		return json;
 	}
 
 	private byte[] buildMultipartBody(byte[] wavData, String boundary) throws Exception {
@@ -202,7 +236,7 @@ public class ASRClientImpl implements ASRClient {
 
 	}
 
-	protected String base64Encode(AudioChunk ac) {
+	protected String base64Encode(PCMAudioChunk ac) {
 		float[] data = ac.getAudio();
 
 		// Step 1: Convert float[] to byte[]
@@ -216,7 +250,7 @@ public class ASRClientImpl implements ASRClient {
 		return base64String;
 	}
 
-	protected String base64Encode2(AudioChunk ac) {
+	protected String base64Encode2(PCMAudioChunk ac) {
 		float[] data = ac.getAudio();
 		byte[] pcm16 = new byte[data.length * 2]; // 2 bytes per sample
 
