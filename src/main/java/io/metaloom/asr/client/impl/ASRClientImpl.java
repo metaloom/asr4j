@@ -22,8 +22,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import io.metaloom.asr.client.ASRClient;
-import io.metaloom.asr.whisper.PCMAudioChunk;
 import io.metaloom.asr.whisper.AudioExtractor;
+import io.metaloom.asr.whisper.PCMAudioChunk;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 
@@ -42,7 +42,7 @@ public class ASRClientImpl implements ASRClient {
 	// public static final String MODEL = "mistralai/Voxtral-Mini-4B-Realtime-2602";
 	public static final String MODEL = "openai/whisper-large-v3";
 
-	public static final String MOVIE = "movies/siw.das.fehlende.fragment.avi";
+	public static final String MOVIE = "media/jfk.webm";
 
 	public static int deltaCount = 0;
 

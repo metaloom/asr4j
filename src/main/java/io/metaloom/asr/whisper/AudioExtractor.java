@@ -89,9 +89,10 @@ public class AudioExtractor {
 			grabber.start();
 
 			List<float[]> chunks = new ArrayList<>();
+			List<float[]> silenceChunks = new ArrayList<>();
 			int totalSamples = 0;
 			int silenceCounter = 0;
-			int silenceMinSamples = 2000;
+			int silenceMinSamples = 3000;
 			Frame frame;
 			while ((frame = grabber.grabSamples()) != null) {
 				if (frame.samples == null) {
@@ -103,25 +104,37 @@ public class AudioExtractor {
 				float[] chunk = new float[fb.remaining()];
 				fb.get(chunk);
 
-				if (isSilentRMS(chunk, 0.008f)) {
+				boolean isSilence = isSilentRMS(chunk, 0.01f);
+				if (isSilence) {
 					silenceCounter += chunk.length;
-					// We skip silence since whisper hallucinates silence into "thank you"
-					continue;
+					silenceChunks.add(chunk);
 				} else {
-					silenceCounter = 0; // reset silence counter when audio is detected
+					// We encountered non-silence
+					// Check if the silence was long enough
+					if (silenceCounter > silenceMinSamples) {
+						// Discard the silence
+						silenceChunks.clear();
+						silenceCounter = 0;
+
+						// Silence was broken so flush the chunks out
+						audioChunkConsumer.accept(new PCMAudioChunk(concat(chunks, totalSamples)));
+						chunks.clear();
+						totalSamples = 0;
+						
+					} else {
+						// Silence was not long enough so we add it to the regular chunks
+						chunks.addAll(silenceChunks);
+						totalSamples += silenceCounter;
+						silenceChunks.clear();
+						silenceCounter=0;
+					}
+
+					// Add the non-silence to the chunk list
+					chunks.add(chunk);
+					totalSamples += chunk.length;
 				}
 
-				chunks.add(chunk);
-				totalSamples += chunk.length;
-
-				// Collect up to 10k samples before we dispatch a chunk
-				if ((silenceCounter >= silenceMinSamples && totalSamples > 25_000) || totalSamples > 30_000) {
-					// System.err.println("Silence! " + silenceCounter);
-					audioChunkConsumer.accept(new PCMAudioChunk(concat(chunks, totalSamples)));
-					chunks.clear();
-					totalSamples = 0;
-					continue;
-				}
+				
 
 			}
 			// Also handle remaining chunks
