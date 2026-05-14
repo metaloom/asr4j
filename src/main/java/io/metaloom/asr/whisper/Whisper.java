@@ -17,6 +17,7 @@ public class Whisper {
 	private WhisperCpp whisperCpp;
 
 	public Whisper(String modelPath) throws FileNotFoundException {
+		WhisperNativeLoader.load();
 		whisperCpp = new WhisperCpp();
 		whisperCpp.initContext(modelPath);
 	}
@@ -94,6 +95,22 @@ public class Whisper {
 
 	public static Whisper create(String modelPath) throws FileNotFoundException {
 		return new Whisper(modelPath);
+	}
+
+	/**
+	 * Transcribe raw PCM float audio data directly (mono, 16kHz, float32).
+	 *
+	 * @param pcm  audio samples as float array
+	 * @param lang language code (e.g. "en")
+	 * @return list of transcribed segments
+	 */
+	public List<WhisperSegment> transcribe(float[] pcm, String lang) throws Exception {
+		WhisperFullParams.ByValue whisperParams = whisperCpp.getFullDefaultParams(
+			WhisperSamplingStrategy.WHISPER_SAMPLING_BEAM_SEARCH);
+		whisperParams.temperature = 0.0f;
+		whisperParams.temperature_inc = 0.2f;
+		whisperParams.language = lang;
+		return whisperCpp.fullTranscribeWithTime(whisperParams, pcm);
 	}
 
 }
