@@ -24,6 +24,9 @@ import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
+import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +34,7 @@ import org.bytedeco.javacv.FFmpegFrameGrabber;
 import org.bytedeco.javacv.Frame;
 
 import io.metaloom.asr.client.ASRClient;
+import io.metaloom.asr.client.ASRSegment;
 import io.metaloom.asr.whisper.AudioExtractor;
 import io.metaloom.asr.whisper.PCMUtils;
 import io.vertx.core.json.JsonArray;
@@ -160,19 +164,65 @@ public class ASRClientImpl implements ASRClient {
 	}
 
 	@Override
-	public void realtimePulse(String pulseSource, int durationSeconds) throws Exception {
-		if (durationSeconds <= 0) {
-			throw new IllegalArgumentException("durationSeconds must be > 0");
+	public void realtimePulse(String pulseSource, int maxChunkSeconds, Consumer<ASRSegment> consumer) throws Exception {
+		if (maxChunkSeconds <= 0) {
+			throw new IllegalArgumentException("maxChunkSeconds must be > 0");
+		}
+		if (consumer == null) {
+			throw new IllegalArgumentException("consumer must not be null");
 		}
 		String source = (pulseSource == null || pulseSource.isBlank()) ? "default" : pulseSource;
-		int maxChunkSeconds = durationSeconds;
 		int maxChunkBytes = maxChunkSeconds * 16000 * 2;
-		int minChunkBytes = 16000 * 2 / 2; // 500ms minimum to avoid too small commits.
-		long silenceBoundaryNs = TimeUnit.MILLISECONDS.toNanos(650);
+		int minChunkBytes = 16000 * 2 / 4; // 250ms minimum to avoid micro commits
+		long silenceBoundaryNs = TimeUnit.MILLISECONDS.toNanos(350);
 
 		LinkedBlockingQueue<String> messageQueue = new LinkedBlockingQueue<>();
 		WebSocket webSocket = openRealtimeSocket(messageQueue);
 		send(webSocket, sessionUpdate());
+
+		AtomicReference<Throwable> error = new AtomicReference<>();
+		AtomicBoolean running = new AtomicBoolean(true);
+
+		// Decouple network sending from audio capture: a blocking call to
+		// streamAndCommit on the capture thread would freeze the PulseAudio
+		// reader and delay silence detection of the next utterance, which is
+		// what produced the visible "delayed by one" effect.
+		//
+		// Voxtral streaming quirk: the model only flushes its tokens for a
+		// committed buffer once it sees ENOUGH trailing audio context. A bare
+		// commit for a 1-2s utterance produces no deltas until the next commit
+		// arrives (== "delayed by one phrase"). Padding the same commit with
+		// ~1.5s of trailing zero-PCM works around this and yields deltas within
+		// ~250-400ms of commit.
+		final byte[] silencePad = new byte[16000 * 2 * 3 / 2]; // 1500ms @ 16kHz mono PCM16
+		LinkedBlockingQueue<byte[]> sendQueue = new LinkedBlockingQueue<>();
+		Thread senderThread = new Thread(() -> {
+			try {
+				while (running.get() || !sendQueue.isEmpty()) {
+					byte[] segment = sendQueue.poll(200, TimeUnit.MILLISECONDS);
+					if (segment == null) {
+						continue;
+					}
+					byte[] padded = new byte[segment.length + silencePad.length];
+					System.arraycopy(segment, 0, padded, 0, segment.length);
+					// remaining bytes default to zero == silence
+					long t0 = System.nanoTime();
+					streamAndCommit(webSocket, padded, 0L);
+					logger.debug("realtimePulse: sent+committed {} bytes ({} real + {} silence pad) in {} ms",
+						padded.length, segment.length, silencePad.length,
+						(System.nanoTime() - t0) / 1_000_000);
+				}
+			} catch (Throwable t) {
+				error.compareAndSet(null, t);
+			}
+		}, "asr-realtime-pulse-send");
+		senderThread.setDaemon(true);
+		senderThread.start();
+
+		Thread receiverThread = new Thread(() -> consumeRealtimeTranscript(messageQueue, running, error, consumer),
+			"asr-realtime-pulse-recv");
+		receiverThread.setDaemon(true);
+		receiverThread.start();
 
 		ByteArrayOutputStream segmentBuffer = new ByteArrayOutputStream(maxChunkBytes);
 		boolean speechDetected = false;
@@ -182,9 +232,22 @@ public class ASRClientImpl implements ASRClient {
 			grabber.setFormat("pulse");
 			grabber.setAudioChannels(1);
 			grabber.setSampleRate(16000);
+			// Default PulseAudio fragment size is server-decided and is usually
+			// ~1-2 seconds, which makes microphone capture lag behind real time
+			// by an entire phrase. Force a small fragment to keep latency low.
+			// 1600 bytes = 50ms at 16kHz mono PCM16.
+			grabber.setOption("fragment_size", "1600");
+			grabber.setOption("frame_size", "1600");
 			grabber.start();
+			long startNs = System.nanoTime();
+			logger.debug("realtimePulse: capture started, source={}", source);
 
 			while (!Thread.currentThread().isInterrupted()) {
+				Throwable throwable = error.get();
+				if (throwable != null) {
+					throw toException(throwable);
+				}
+
 				Frame frame = grabber.grabSamples();
 				if (frame == null || frame.samples == null || frame.samples.length == 0 || frame.samples[0] == null) {
 					continue;
@@ -197,8 +260,12 @@ public class ASRClientImpl implements ASRClient {
 
 				segmentBuffer.write(pcm);
 				long now = System.nanoTime();
-				if (!PCMUtils.isSilentRMS(pcm, 0.012f)) {
-					System.out.println("Detected voice");
+				boolean silent = PCMUtils.isSilentRMS(pcm, 0.008f);
+				if (!silent) {
+					if (!speechDetected) {
+						logger.debug("realtimePulse: speech onset t+{}ms",
+							(now - startNs) / 1_000_000);
+					}
 					speechDetected = true;
 					lastSpeechTs = now;
 				}
@@ -213,9 +280,11 @@ public class ASRClientImpl implements ASRClient {
 				}
 
 				if (speechDetected) {
-					System.out.println("SNC");
-					streamAndCommit(webSocket, segmentBuffer.toByteArray(), 0L);
-					collectTranscript(messageQueue, 15, false);
+					long audioMs = (segmentBuffer.size() / 2) * 1000L / 16000L;
+					logger.debug("realtimePulse: enqueueing segment audioMs={} reason={} t+{}ms",
+						audioMs, silenceBoundaryReached ? "silence" : "maxChunk",
+						(System.nanoTime() - startNs) / 1_000_000);
+					sendQueue.offer(segmentBuffer.toByteArray());
 				}
 
 				segmentBuffer.reset();
@@ -223,8 +292,88 @@ public class ASRClientImpl implements ASRClient {
 				lastSpeechTs = now;
 			}
 		} finally {
+			running.set(false);
+			senderThread.join(2000);
 			webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "Bye").join();
+			receiverThread.join(1000);
+			Throwable throwable = error.get();
+			if (throwable != null) {
+				throw toException(throwable);
+			}
 		}
+	}
+
+	private void consumeRealtimeTranscript(LinkedBlockingQueue<String> messageQueue, AtomicBoolean running,
+		AtomicReference<Throwable> error, Consumer<ASRSegment> consumer) {
+		try {
+			StringBuilder segmentDeltas = new StringBuilder();
+			while (running.get() || !messageQueue.isEmpty()) {
+				String reply = messageQueue.poll(200, TimeUnit.MILLISECONDS);
+				if (reply == null) {
+					continue;
+				}
+
+				JsonObject replyJson;
+				try {
+					replyJson = new JsonObject(reply);
+				} catch (Exception e) {
+					logger.debug("Ignoring non-JSON realtime frame: {}", reply);
+					continue;
+				}
+
+				String type = replyJson.getString("type", "");
+				logger.trace("realtimePulse: rx event type={}", type);
+				if ("error".equals(type) || replyJson.containsKey("error")) {
+					error.compareAndSet(null, new IllegalStateException("Realtime server returned error: " + replyJson.encode()));
+					break;
+				}
+
+				String delta = extractDelta(replyJson);
+				if (delta != null && !delta.isEmpty()) {
+					segmentDeltas.append(delta);
+					consumer.accept(new ASRSegment(delta, false, type, replyJson));
+				}
+
+				String finalText = extractFinalText(replyJson);
+				if (finalText != null && !finalText.isEmpty()) {
+					String alreadyEmitted = segmentDeltas.toString();
+					String remainder;
+					if (alreadyEmitted.isEmpty()) {
+						remainder = finalText;
+					} else if (finalText.startsWith(alreadyEmitted)) {
+						remainder = finalText.substring(alreadyEmitted.length());
+					} else if (finalText.equals(alreadyEmitted)) {
+						remainder = "";
+					} else {
+						// Server corrected itself: emit the corrected final as a single segment.
+						remainder = finalText;
+					}
+					if (!remainder.isEmpty()) {
+						consumer.accept(new ASRSegment(remainder, true, type, replyJson));
+					} else {
+						consumer.accept(new ASRSegment("", true, type, replyJson));
+					}
+					segmentDeltas.setLength(0);
+				} else if (isDoneEvent(type)) {
+					consumer.accept(new ASRSegment("", true, type, replyJson));
+					segmentDeltas.setLength(0);
+				}
+			}
+		} catch (Throwable t) {
+			error.compareAndSet(null, t);
+		}
+	}
+
+	private Exception toException(Throwable throwable) {
+		if (throwable instanceof Exception e) {
+			return e;
+		}
+		return new RuntimeException(throwable);
+	}
+
+	private static void printNow(String text) {
+		System.out.print(text);
+		System.out.flush();
 	}
 
 	private void realtimePcm16(byte[] pcm16, long pacingMs) throws Exception {
@@ -246,27 +395,51 @@ public class ASRClientImpl implements ASRClient {
 			? baseURL.replaceFirst("^https", "wss")
 			: baseURL.replaceFirst("^http", "ws");
 		URI uri = new URI(wsURL + "/realtime");
+		StringBuilder textBuffer = new StringBuilder();
 		return client.newWebSocketBuilder()
 			.buildAsync(uri, new Listener() {
 
 				@Override
+				public void onOpen(WebSocket webSocket) {
+					webSocket.request(Long.MAX_VALUE);
+				}
+
+				@Override
 				public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
-					messageQueue.offer(data.toString());
-					return Listener.super.onText(webSocket, data, last);
+					synchronized (textBuffer) {
+						textBuffer.append(data);
+						if (last) {
+							String msg = textBuffer.toString();
+							textBuffer.setLength(0);
+							if (logger.isTraceEnabled()) {
+								logger.trace("ws<- {} bytes", msg.length());
+							}
+							messageQueue.offer(msg);
+						}
+					}
+					return null;
 				}
 
 			}).join();
 	}
 
 	private void streamAndCommit(WebSocket webSocket, byte[] pcm16, long pacingMs) throws Exception {
-		int bytesPerChunk = 320; // 10ms at 16kHz mono PCM16
+		// Send the whole segment as ONE append. Splitting into many tiny
+		// (e.g. 320 byte) appends multiplies WebSocket framing+parsing overhead
+		// on both client and server and was responsible for multi-second commit
+		// latency. Pacing >0 falls back to chunked sends for offline tests that
+		// want to simulate real-time streaming.
 		long effectivePacingMs = Math.max(0L, pacingMs);
-		for (int offset = 0; offset < pcm16.length; offset += bytesPerChunk) {
-			int end = Math.min(offset + bytesPerChunk, pcm16.length);
-			byte[] chunk = Arrays.copyOfRange(pcm16, offset, end);
-			String data = Base64.getEncoder().encodeToString(chunk);
+		if (effectivePacingMs == 0L) {
+			String data = Base64.getEncoder().encodeToString(pcm16);
 			send(webSocket, pcmData(data));
-			if (effectivePacingMs > 0) {
+		} else {
+			int bytesPerChunk = 3200; // 100ms at 16kHz mono PCM16
+			for (int offset = 0; offset < pcm16.length; offset += bytesPerChunk) {
+				int end = Math.min(offset + bytesPerChunk, pcm16.length);
+				byte[] chunk = Arrays.copyOfRange(pcm16, offset, end);
+				String data = Base64.getEncoder().encodeToString(chunk);
+				send(webSocket, pcmData(data));
 				Thread.sleep(effectivePacingMs);
 			}
 		}
@@ -315,14 +488,14 @@ public class ASRClientImpl implements ASRClient {
 			String delta = extractDelta(replyJson);
 			if (delta != null && !delta.isEmpty()) {
 				transcript.append(delta);
-				System.out.print(delta);
+				printNow(delta);
 				lastDelta = System.nanoTime();
 			}
 
 			String finalText = extractFinalText(replyJson);
 			if (finalText != null && !finalText.isEmpty() && transcript.isEmpty()) {
 				transcript.append(finalText);
-				System.out.print(finalText);
+				printNow(finalText);
 				lastDelta = System.nanoTime();
 			}
 

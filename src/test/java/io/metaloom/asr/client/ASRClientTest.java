@@ -51,16 +51,22 @@ public class ASRClientTest {
 	public void testRealtimePulseEndpoint() throws Exception {
 		Assumptions.assumeTrue(isPactlReachable(), "PulseAudio tools are not available.");
 
-		String pulseSource = System.getenv().getOrDefault("ASR_PULSE_SOURCE", "default");
-		String configuredChunkWindow = System.getenv().getOrDefault(
-			"ASR_PULSE_MAX_CHUNK_SECONDS",
-			System.getenv().getOrDefault("ASR_PULSE_DURATION_SECONDS", "3"));
-		int maxChunkSeconds = Integer.parseInt(configuredChunkWindow);
+		String pulseSource = "default";
+		int maxChunkSeconds = 10;
 
 		ASRClient client = ASRClient.newBuilder()
 			.setModel(ASRClient.DEFAULT_VOXTRAL_MINI_4B_RT_MODEL_NAME)
 			.setBaseURL(TEST_BASE_URL).build();
-		client.realtimePulse(pulseSource, maxChunkSeconds);
+		client.realtimePulse(pulseSource, maxChunkSeconds, segment -> {
+			if (!segment.text().isEmpty()) {
+				System.out.print(segment.text());
+				System.out.flush();
+			}
+			if (segment.isFinal()) {
+				System.out.println();
+				System.out.flush();
+			}
+		});
 	}
 
 	private static boolean isPactlReachable() {

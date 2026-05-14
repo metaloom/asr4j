@@ -1,6 +1,7 @@
 package io.metaloom.asr.client;
 
 import java.net.http.HttpResponse;
+import java.util.function.Consumer;
 
 import io.metaloom.asr.client.impl.ASRClientBuilderImpl;
 import io.vertx.core.json.JsonArray;
@@ -87,16 +88,20 @@ public interface ASRClient {
 
 	/**
 	 * Capture audio continuously from a PulseAudio source and transcribe it via
-	 * realtime API.
+	 * the realtime API. The provided consumer receives one
+	 * {@link ASRSegment} per realtime event (delta or final). The call blocks
+	 * until the current thread is interrupted.
 	 *
 	 * @param pulseSource
 	 *            PulseAudio source name (e.g. "default")
-	 * @param durationSeconds
-	 *            Maximum chunk window in seconds before a forced commit. The
-	 *            stream itself runs continuously until interrupted.
+	 * @param maxChunkSeconds
+	 *            Maximum chunk window in seconds before a forced commit is
+	 *            performed regardless of silence detection.
+	 * @param consumer
+	 *            Receives transcript segments as they are produced.
 	 * @throws Exception
 	 */
-	void realtimePulse(String pulseSource, int durationSeconds) throws Exception;
+	void realtimePulse(String pulseSource, int maxChunkSeconds, Consumer<ASRSegment> consumer) throws Exception;
 
 	JsonArray transcribeSegmented(String movie) throws Exception;
 
