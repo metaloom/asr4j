@@ -1,9 +1,11 @@
 package io.metaloom.asr.usage;
 
+import java.io.File;
 import java.net.http.HttpResponse;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.Flow;
 
+import org.junit.jupiter.api.Assumptions;
 import org.junit.jupiter.api.Test;
 
 import io.github.ggerganov.whispercpp.bean.WhisperSegment;
@@ -74,10 +76,11 @@ public class UsageExampleTest {
 	@Test
 	public void testRealtimeEndpoint() throws Exception {
 		// SNIPPET START realtime-client-usage.example
-		String MOVIE = "media/jfk.webm";
+		String MOVIE = "media/jfk_10s_pcm16.wav";
+		Assumptions.assumeTrue(new File(MOVIE).exists(), "Missing realtime fixture: " + MOVIE);
 
 		ASRClient client = ASRClient.newBuilder()
-			.setModel(ASRClient.DEFAULT_VOXTRAL_MODEL_NAME)
+			.setModel(ASRClient.DEFAULT_VOXTRAL_MINI_4B_RT_MODEL_NAME)
 			.setBaseURL("http://localhost:8000/v1").build();
 
 		client.realtime(MOVIE);

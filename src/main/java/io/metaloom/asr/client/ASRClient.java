@@ -12,7 +12,7 @@ public interface ASRClient {
 
 	public static final String DEFAULT_WHISPER_MODEL_NAME = "openai/whisper-large-v3";
 
-	public static final String DEFAULT_VOXTRAL_MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602";
+	public static final String DEFAULT_VOXTRAL_MINI_4B_RT_MODEL_NAME = "mistralai/Voxtral-Mini-4B-Realtime-2602";
 
 	public static ASRClient newFaceDetectClient() {
 		return newBuilder().setBaseURL(DEFAULT_BASEURL).build();
@@ -84,6 +84,19 @@ public interface ASRClient {
 	 * @throws Exception
 	 */
 	void realtime(String mediaPath) throws Exception;
+
+	/**
+	 * Capture audio continuously from a PulseAudio source and transcribe it via
+	 * realtime API.
+	 *
+	 * @param pulseSource
+	 *            PulseAudio source name (e.g. "default")
+	 * @param durationSeconds
+	 *            Maximum chunk window in seconds before a forced commit. The
+	 *            stream itself runs continuously until interrupted.
+	 * @throws Exception
+	 */
+	void realtimePulse(String pulseSource, int durationSeconds) throws Exception;
 
 	JsonArray transcribeSegmented(String movie) throws Exception;
 

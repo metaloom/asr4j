@@ -1,5 +1,7 @@
 package io.metaloom.asr.whisper;
 
+import static io.metaloom.asr.whisper.PCMUtils.concat;
+import static io.metaloom.asr.whisper.PCMUtils.floatToPCM16;
 import static org.bytedeco.ffmpeg.global.avcodec.AV_CODEC_ID_PCM_S16LE;
 import static org.bytedeco.ffmpeg.global.avutil.AV_SAMPLE_FMT_FLT;
 import static org.bytedeco.ffmpeg.global.avutil.AV_SAMPLE_FMT_S16;
@@ -104,7 +106,7 @@ public class AudioExtractor {
 				float[] chunk = new float[fb.remaining()];
 				fb.get(chunk);
 
-				boolean isSilence = isSilentRMS(chunk, 0.01f);
+				boolean isSilence = PCMUtils.isSilentRMS(chunk, 0.01f);
 				if (isSilence) {
 					silenceCounter += chunk.length;
 					silenceChunks.add(chunk);
@@ -149,40 +151,4 @@ public class AudioExtractor {
 		}
 	}
 
-	private static short[] floatToPCM16(float[] input) {
-		short[] out = new short[input.length];
-		for (int i = 0; i < input.length; i++) {
-			float v = Math.max(-1f, Math.min(1f, input[i]));
-			out[i] = (short) (v * 32767);
-		}
-		return out;
-	}
-
-	private static boolean isSilentRMS(float[] samples, float threshold) {
-		double sum = 0;
-		for (float s : samples) {
-			sum += s * s;
-		}
-		double rms = Math.sqrt(sum / samples.length);
-		return rms < threshold;
-	}
-
-	// 0.02
-	private static float[] concat(List<float[]> chunks, int totalSamples) {
-		float[] pcm = new float[totalSamples];
-		int offset = 0;
-		for (float[] c : chunks) {
-			System.arraycopy(c, 0, pcm, offset, c.length);
-			offset += c.length;
-		}
-		return pcm;
-	}
-
-	private static boolean isSilent(float[] samples, float threshold) {
-		float max = 0;
-		for (float s : samples) {
-			max = Math.max(max, Math.abs(s));
-		}
-		return max < threshold;
-	}
 }

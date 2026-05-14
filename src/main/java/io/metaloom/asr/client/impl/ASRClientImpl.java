@@ -1,6 +1,10 @@
 package io.metaloom.asr.client.impl;
 
 import java.io.ByteArrayOutputStream;
+import java.nio.Buffer;
+import java.nio.ByteBuffer;
+import java.nio.FloatBuffer;
+import java.nio.ShortBuffer;
 import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
@@ -9,21 +13,26 @@ import java.net.http.HttpResponse.BodyHandler;
 import java.net.http.HttpResponse.BodySubscribers;
 import java.net.http.WebSocket;
 import java.net.http.WebSocket.Listener;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.Base64;
+import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.CompletionStage;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.TimeUnit;
-import java.util.concurrent.atomic.AtomicLong;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.bytedeco.javacv.FFmpegFrameGrabber;
+import org.bytedeco.javacv.Frame;
 
 import io.metaloom.asr.client.ASRClient;
 import io.metaloom.asr.whisper.AudioExtractor;
-import io.metaloom.asr.whisper.PCMAudioChunk;
+import io.metaloom.asr.whisper.PCMUtils;
 import io.vertx.core.json.JsonArray;
 import io.vertx.core.json.JsonObject;
 
@@ -38,13 +47,6 @@ public class ASRClientImpl implements ASRClient {
 	private String lang;
 
 	private HttpClient client;
-
-	// public static final String MODEL = "mistralai/Voxtral-Mini-4B-Realtime-2602";
-	public static final String MODEL = "openai/whisper-large-v3";
-
-	public static final String MOVIE = "media/jfk.webm";
-
-	public static int deltaCount = 0;
 
 	protected ASRClientImpl(ASRClient.Builder builder) {
 		this.baseURL = builder.baseURL();
@@ -150,55 +152,237 @@ public class ASRClientImpl implements ASRClient {
 
 	@Override
 	public void realtime(String filename) throws Exception {
+		byte[] wavData = filename.toLowerCase().endsWith(".wav")
+			? Files.readAllBytes(Path.of(filename))
+			: AudioExtractor.decodeAudioToWAV(filename);
+		byte[] pcm16 = extractPcm16Payload(wavData);
+		realtimePcm16(pcm16, 0L);
+	}
 
-		URI uri = new URI(baseURL.replace("http", "ws") + "/realtime");
-		// Queue to store incoming messages
+	@Override
+	public void realtimePulse(String pulseSource, int durationSeconds) throws Exception {
+		if (durationSeconds <= 0) {
+			throw new IllegalArgumentException("durationSeconds must be > 0");
+		}
+		String source = (pulseSource == null || pulseSource.isBlank()) ? "default" : pulseSource;
+		int maxChunkSeconds = durationSeconds;
+		int maxChunkBytes = maxChunkSeconds * 16000 * 2;
+		int minChunkBytes = 16000 * 2 / 2; // 500ms minimum to avoid too small commits.
+		long silenceBoundaryNs = TimeUnit.MILLISECONDS.toNanos(650);
+
 		LinkedBlockingQueue<String> messageQueue = new LinkedBlockingQueue<>();
+		WebSocket webSocket = openRealtimeSocket(messageQueue);
+		send(webSocket, sessionUpdate());
 
-		// Create WebSocket
-		WebSocket webSocket = client.newWebSocketBuilder()
+		ByteArrayOutputStream segmentBuffer = new ByteArrayOutputStream(maxChunkBytes);
+		boolean speechDetected = false;
+		long lastSpeechTs = System.nanoTime();
+
+		try (FFmpegFrameGrabber grabber = new FFmpegFrameGrabber(source)) {
+			grabber.setFormat("pulse");
+			grabber.setAudioChannels(1);
+			grabber.setSampleRate(16000);
+			grabber.start();
+
+			while (!Thread.currentThread().isInterrupted()) {
+				Frame frame = grabber.grabSamples();
+				if (frame == null || frame.samples == null || frame.samples.length == 0 || frame.samples[0] == null) {
+					continue;
+				}
+
+				byte[] pcm = toPcm16Bytes(frame.samples[0]);
+				if (pcm.length == 0) {
+					continue;
+				}
+
+				segmentBuffer.write(pcm);
+				long now = System.nanoTime();
+				if (!PCMUtils.isSilentRMS(pcm, 0.012f)) {
+					System.out.println("Detected voice");
+					speechDetected = true;
+					lastSpeechTs = now;
+				}
+
+				boolean silenceBoundaryReached = speechDetected
+					&& (now - lastSpeechTs) >= silenceBoundaryNs
+					&& segmentBuffer.size() >= minChunkBytes;
+				boolean maxChunkReached = segmentBuffer.size() >= maxChunkBytes;
+
+				if (!silenceBoundaryReached && !maxChunkReached) {
+					continue;
+				}
+
+				if (speechDetected) {
+					System.out.println("SNC");
+					streamAndCommit(webSocket, segmentBuffer.toByteArray(), 0L);
+					collectTranscript(messageQueue, 15, false);
+				}
+
+				segmentBuffer.reset();
+				speechDetected = false;
+				lastSpeechTs = now;
+			}
+		} finally {
+			webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "Bye").join();
+		}
+	}
+
+	private void realtimePcm16(byte[] pcm16, long pacingMs) throws Exception {
+		LinkedBlockingQueue<String> messageQueue = new LinkedBlockingQueue<>();
+		WebSocket webSocket = openRealtimeSocket(messageQueue);
+
+		send(webSocket, sessionUpdate());
+		streamAndCommit(webSocket, pcm16, pacingMs);
+		String transcript = collectTranscript(messageQueue, 45, true);
+
+		webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "Bye").join();
+		if (!transcript.isEmpty()) {
+			System.out.println();
+		}
+	}
+
+	private WebSocket openRealtimeSocket(LinkedBlockingQueue<String> messageQueue) throws Exception {
+		String wsURL = baseURL.startsWith("https")
+			? baseURL.replaceFirst("^https", "wss")
+			: baseURL.replaceFirst("^http", "ws");
+		URI uri = new URI(wsURL + "/realtime");
+		return client.newWebSocketBuilder()
 			.buildAsync(uri, new Listener() {
 
 				@Override
 				public CompletionStage<?> onText(WebSocket webSocket, CharSequence data, boolean last) {
-					messageQueue.offer(data.toString()); // enqueue incoming message
+					messageQueue.offer(data.toString());
 					return Listener.super.onText(webSocket, data, last);
 				}
 
 			}).join();
-
-		// Sequentially send messages and await reply
-		sendAndAwait(webSocket, messageQueue, sessionUpdate());
-		sendAndAwait(webSocket, messageQueue, bufferCommit(false));
-
-		AtomicLong sendMsg = new AtomicLong(0);
-		AudioExtractor.decodeAudioToPCM(filename, ac -> {
-			String data = base64Encode2(ac);
-			try {
-				Thread.sleep(20);
-				sendMsg.incrementAndGet();
-				sendAndAwait(webSocket, messageQueue, pcmData(data));
-				sendAndAwait(webSocket, messageQueue, bufferCommit(false));
-			} catch (Exception e) {
-				e.printStackTrace();
-			}
-		});
-		sendAndAwait(webSocket, messageQueue, bufferCommit(true));
-
-		webSocket.sendClose(WebSocket.NORMAL_CLOSURE, "Bye").join();
 	}
 
-	private JsonObject bufferCommit(boolean finalFlag) {
+	private void streamAndCommit(WebSocket webSocket, byte[] pcm16, long pacingMs) throws Exception {
+		int bytesPerChunk = 320; // 10ms at 16kHz mono PCM16
+		long effectivePacingMs = Math.max(0L, pacingMs);
+		for (int offset = 0; offset < pcm16.length; offset += bytesPerChunk) {
+			int end = Math.min(offset + bytesPerChunk, pcm16.length);
+			byte[] chunk = Arrays.copyOfRange(pcm16, offset, end);
+			String data = Base64.getEncoder().encodeToString(chunk);
+			send(webSocket, pcmData(data));
+			if (effectivePacingMs > 0) {
+				Thread.sleep(effectivePacingMs);
+			}
+		}
+		send(webSocket, bufferCommit());
+	}
+
+	private String collectTranscript(LinkedBlockingQueue<String> messageQueue, int timeoutSeconds, boolean requireOutput) throws Exception {
+		StringBuilder transcript = new StringBuilder();
+		List<String> seenEventTypes = new ArrayList<>();
+		List<String> sampleDeltaPayloads = new ArrayList<>();
+		long deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(timeoutSeconds);
+		long lastDelta = -1L;
+
+		while (System.nanoTime() < deadline) {
+			String reply = messageQueue.poll(2, TimeUnit.SECONDS);
+			if (reply == null) {
+				if (lastDelta > 0 && System.nanoTime() - lastDelta > TimeUnit.SECONDS.toNanos(2)) {
+					break;
+				}
+				continue;
+			}
+
+			JsonObject replyJson;
+			try {
+				replyJson = new JsonObject(reply);
+			} catch (Exception e) {
+				logger.debug("Ignoring non-JSON realtime frame: {}", reply);
+				continue;
+			}
+
+			String type = replyJson.getString("type");
+			if (type == null) {
+				type = "";
+			}
+			if (!type.isEmpty() && seenEventTypes.size() < 30) {
+				seenEventTypes.add(type);
+			}
+			if ("transcription.delta".equals(type) && sampleDeltaPayloads.size() < 3) {
+				sampleDeltaPayloads.add(replyJson.encode());
+			}
+
+			if ("error".equals(type) || replyJson.containsKey("error")) {
+				throw new IllegalStateException("Realtime server returned error: " + replyJson.encode());
+			}
+
+			String delta = extractDelta(replyJson);
+			if (delta != null && !delta.isEmpty()) {
+				transcript.append(delta);
+				System.out.print(delta);
+				lastDelta = System.nanoTime();
+			}
+
+			String finalText = extractFinalText(replyJson);
+			if (finalText != null && !finalText.isEmpty() && transcript.isEmpty()) {
+				transcript.append(finalText);
+				System.out.print(finalText);
+				lastDelta = System.nanoTime();
+			}
+
+			if (isDoneEvent(type)) {
+				break;
+			}
+		}
+
+		String finalTranscript = transcript.toString().trim();
+		if (requireOutput && finalTranscript.isEmpty()) {
+			throw new IllegalStateException(
+				"Realtime session completed without transcript output. Seen event types: " + seenEventTypes
+					+ ", sample delta payloads: " + sampleDeltaPayloads);
+		}
+		return finalTranscript;
+	}
+
+	private static byte[] toPcm16Bytes(Buffer sampleBuffer) {
+		if (sampleBuffer instanceof FloatBuffer fb) {
+			FloatBuffer copy = fb.duplicate();
+			byte[] pcm = new byte[copy.remaining() * 2];
+			int out = 0;
+			while (copy.hasRemaining()) {
+				float f = Math.max(-1f, Math.min(1f, copy.get()));
+				short s = (short) (f * 32767f);
+				pcm[out++] = (byte) (s & 0xFF);
+				pcm[out++] = (byte) ((s >> 8) & 0xFF);
+			}
+			return pcm;
+		}
+		if (sampleBuffer instanceof ShortBuffer sb) {
+			ShortBuffer copy = sb.duplicate();
+			byte[] pcm = new byte[copy.remaining() * 2];
+			int out = 0;
+			while (copy.hasRemaining()) {
+				short s = copy.get();
+				pcm[out++] = (byte) (s & 0xFF);
+				pcm[out++] = (byte) ((s >> 8) & 0xFF);
+			}
+			return pcm;
+		}
+		if (sampleBuffer instanceof ByteBuffer bb) {
+			ByteBuffer copy = bb.duplicate();
+			byte[] pcm = new byte[copy.remaining()];
+			copy.get(pcm);
+			return pcm;
+		}
+		return new byte[0];
+	}
+
+	private JsonObject bufferCommit() {
 		JsonObject msg = new JsonObject();
 		msg.put("type", "input_audio_buffer.commit");
-		msg.put("final", finalFlag);
 		return msg;
 	}
 
 	private JsonObject sessionUpdate() {
 		JsonObject msg = new JsonObject();
 		msg.put("type", "session.update");
-		msg.put("model", MODEL);
+		msg.put("model", model);
 		return msg;
 	}
 
@@ -210,60 +394,150 @@ public class ASRClientImpl implements ASRClient {
 		return msg3;
 	}
 
-	private static void sendAndAwait(WebSocket webSocket, LinkedBlockingQueue<String> queue, JsonObject json) throws Exception {
-		// System.out.println("Sending: " + json.getString("type"));
-		webSocket.sendText(json.encode(), true).join(); // send message
+	private static void send(WebSocket webSocket, JsonObject json) {
+		webSocket.sendText(json.encode(), true).join();
+	}
 
-		// Wait for reply
-		String reply = queue.poll(5, TimeUnit.SECONDS);
-		if (reply != null) {
-			try {
+	private static byte[] extractPcm16Payload(byte[] wavData) {
+		if (wavData.length < 12 || wavData[0] != 'R' || wavData[1] != 'I' || wavData[2] != 'F' || wavData[3] != 'F') {
+			throw new IllegalArgumentException("Invalid WAV data: missing RIFF header.");
+		}
+		int channels = 1;
+		int bitsPerSample = 16;
+		int audioFormat = 1;
+		byte[] pcmData = null;
 
-				JsonObject replyJson = new JsonObject(reply);
-				if ("transcription.delta".equals(replyJson.getString("type"))) {
-					System.out.print(replyJson.getString("delta"));
-					deltaCount++;
-					if (deltaCount % 80 == 0) {
-						System.out.println();
-					}
-				}
-			} catch (Exception e) {
-				System.err.println(reply);
+		int offset = 12;
+		while (offset + 8 <= wavData.length) {
+			String chunkId = new String(wavData, offset, 4, StandardCharsets.US_ASCII);
+			long chunkSize = littleEndianUnsignedInt(wavData, offset + 4);
+			long dataStart = offset + 8L;
+			long dataEnd = dataStart + chunkSize;
+			if (dataEnd > wavData.length || dataStart > dataEnd) {
+				break;
 			}
-		} else {
-			System.out.println("No reply received for message: " + json.getString("type"));
+			if ("fmt ".equals(chunkId) && chunkSize >= 16) {
+				int base = (int) dataStart;
+				audioFormat = littleEndianUnsignedShort(wavData, base);
+				channels = littleEndianUnsignedShort(wavData, base + 2);
+				bitsPerSample = littleEndianUnsignedShort(wavData, base + 14);
+			}
+			if ("data".equals(chunkId)) {
+				pcmData = Arrays.copyOfRange(wavData, (int) dataStart, (int) dataEnd);
+				break;
+			}
+			offset = (int) (dataEnd + (chunkSize & 1L));
 		}
 
+		if (pcmData == null) {
+			throw new IllegalArgumentException("Invalid WAV data: no data chunk found.");
+		}
+		if (audioFormat != 1 || bitsPerSample != 16) {
+			throw new IllegalArgumentException("Realtime currently supports PCM16 WAV only.");
+		}
+		if (channels <= 1) {
+			return pcmData;
+		}
+
+		int frameCount = pcmData.length / (2 * channels);
+		byte[] mono = new byte[frameCount * 2];
+		for (int frame = 0; frame < frameCount; frame++) {
+			int sum = 0;
+			for (int ch = 0; ch < channels; ch++) {
+				int sampleOffset = (frame * channels + ch) * 2;
+				sum += littleEndianSignedShort(pcmData, sampleOffset);
+			}
+			short avg = (short) (sum / channels);
+			int out = frame * 2;
+			mono[out] = (byte) (avg & 0xFF);
+			mono[out + 1] = (byte) ((avg >> 8) & 0xFF);
+		}
+		return mono;
 	}
 
-	protected String base64Encode(PCMAudioChunk ac) {
-		float[] data = ac.getAudio();
-
-		// Step 1: Convert float[] to byte[]
-		ByteBuffer byteBuffer = ByteBuffer.allocate(data.length * 4); // 4 bytes per float
-		for (float f : data) {
-			byteBuffer.putFloat(f);
-		}
-		byte[] bytes = byteBuffer.array();
-
-		String base64String = Base64.getEncoder().encodeToString(bytes);
-		return base64String;
+	private static long littleEndianUnsignedInt(byte[] data, int offset) {
+		return ((long) data[offset] & 0xFF)
+			| (((long) data[offset + 1] & 0xFF) << 8)
+			| (((long) data[offset + 2] & 0xFF) << 16)
+			| (((long) data[offset + 3] & 0xFF) << 24);
 	}
 
-	protected String base64Encode2(PCMAudioChunk ac) {
-		float[] data = ac.getAudio();
-		byte[] pcm16 = new byte[data.length * 2]; // 2 bytes per sample
+	private static int littleEndianUnsignedShort(byte[] data, int offset) {
+		return (data[offset] & 0xFF) | ((data[offset + 1] & 0xFF) << 8);
+	}
 
-		for (int i = 0; i < data.length; i++) {
-			// Clip to [-1,1] just in case
-			float f = Math.max(-1f, Math.min(1f, data[i]));
-			short s = (short) (f * 32767); // Convert float -> PCM16
-			// Little-endian
-			pcm16[i * 2] = (byte) (s & 0xFF);
-			pcm16[i * 2 + 1] = (byte) ((s >> 8) & 0xFF);
+	private static short littleEndianSignedShort(byte[] data, int offset) {
+		int lo = data[offset] & 0xFF;
+		int hi = data[offset + 1];
+		return (short) ((hi << 8) | lo);
+	}
+
+	private static boolean isDoneEvent(String type) {
+		return "response.done".equals(type)
+			|| "response.audio_transcript.done".equals(type)
+			|| "transcription.done".equals(type)
+			|| "conversation.item.input_audio_transcription.completed".equals(type);
+	}
+
+	private static String extractDelta(JsonObject replyJson) {
+		String type = replyJson.getString("type");
+		if (type == null) {
+			return null;
 		}
+		if ("transcription.delta".equals(type)
+			|| "response.audio_transcript.delta".equals(type)
+			|| "response.output_text.delta".equals(type)
+			|| "conversation.item.input_audio_transcription.delta".equals(type)) {
+			if (replyJson.containsKey("delta")) {
+				return valueToText(replyJson.getValue("delta"));
+			}
+			if (replyJson.containsKey("text")) {
+				return valueToText(replyJson.getValue("text"));
+			}
+		}
+		return null;
+	}
 
-		return Base64.getEncoder().encodeToString(pcm16);
+	private static String extractFinalText(JsonObject replyJson) {
+		String type = replyJson.getString("type");
+		if (type == null) {
+			return null;
+		}
+		if ("transcription.done".equals(type) || "response.audio_transcript.done".equals(type)) {
+			if (replyJson.containsKey("text")) {
+				return valueToText(replyJson.getValue("text"));
+			}
+			if (replyJson.containsKey("transcript")) {
+				return valueToText(replyJson.getValue("transcript"));
+			}
+		}
+		if ("conversation.item.input_audio_transcription.completed".equals(type)
+			&& replyJson.containsKey("transcript")) {
+			return valueToText(replyJson.getValue("transcript"));
+		}
+		return null;
+	}
+
+	private static String valueToText(Object value) {
+		if (value == null) {
+			return null;
+		}
+		if (value instanceof String s) {
+			return s;
+		}
+		if (value instanceof JsonObject obj) {
+			if (obj.containsKey("text")) {
+				return valueToText(obj.getValue("text"));
+			}
+			if (obj.containsKey("content")) {
+				return valueToText(obj.getValue("content"));
+			}
+		}
+		if (value instanceof JsonArray arr && !arr.isEmpty()) {
+			Object first = arr.getValue(0);
+			return valueToText(first);
+		}
+		return value.toString();
 	}
 
 }
