@@ -118,11 +118,18 @@ public class AudioExtractor {
 						silenceChunks.clear();
 						silenceCounter = 0;
 
-						// Silence was broken so flush the chunks out
-						audioChunkConsumer.accept(new PCMAudioChunk(concat(chunks, totalSamples)));
-						chunks.clear();
-						totalSamples = 0;
-						
+						// Silence was broken so flush the chunks out - but only if there is anything
+						// to flush. A recording that *opens* with silence reaches this branch with
+						// nothing accumulated yet, and the consumer would then be handed a
+						// zero-length buffer. Whisper answers that with "offset 0ms is past the end
+						// of the audio", fails to detect a language, and the whole transcription
+						// aborts - for a file whose audio is perfectly fine from the second chunk on.
+						if (!chunks.isEmpty()) {
+							audioChunkConsumer.accept(new PCMAudioChunk(concat(chunks, totalSamples)));
+							chunks.clear();
+							totalSamples = 0;
+						}
+
 					} else {
 						// Silence was not long enough so we add it to the regular chunks
 						chunks.addAll(silenceChunks);

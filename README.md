@@ -105,10 +105,11 @@ vllm serve mistralai/Voxtral-Mini-4B-Realtime-2602 --compilation_config '{"cudag
 ```
 
 ```java
-String MOVIE = "media/jfk.webm";
+String MOVIE = "media/jfk_10s_pcm16.wav";
+Assumptions.assumeTrue(new File(MOVIE).exists(), "Missing realtime fixture: " + MOVIE);
 
 ASRClient client = ASRClient.newBuilder()
-	.setModel(ASRClient.DEFAULT_VOXTRAL_MODEL_NAME)
+	.setModel(ASRClient.DEFAULT_VOXTRAL_MINI_4B_RT_MODEL_NAME)
 	.setBaseURL("http://localhost:8000/v1").build();
 
 client.realtime(MOVIE);
